@@ -43,8 +43,6 @@ func initKeys() {
 }
 
 func signData(data string) string {
-	log.Println("Signing data:", data) // Логируем данные перед подписанием
-
 	h := sha256.Sum256([]byte(data))
 	r, s, err := ecdsa.Sign(rand.Reader, privateKey, h[:])
 	if err != nil {
@@ -61,7 +59,7 @@ func calculateHash(block Block) string {
 }
 
 func signHash(hash string) string {
-	hashBytes, err := hex.DecodeString(hash) // Декодируем HEX-строку в байты
+	hashBytes, err := hex.DecodeString(hash)
 	if err != nil {
 		log.Fatal("Error decoding hash before signing:", err)
 	}
@@ -93,14 +91,14 @@ func verifySignature(data, signature string) bool {
 	s := new(big.Int).SetBytes(sigBytes[32:])
 
 	var dataBytes []byte
-	if len(data) == 64 { // Проверяем, похоже ли это на хеш (HEX-строка 64 символа)
+	if len(data) == 64 {
 		dataBytes, err = hex.DecodeString(data)
 		if err != nil {
 			log.Println("Error decoding hash data before verification:", err)
 			return false
 		}
 	} else {
-		h := sha256.Sum256([]byte(data)) // Обычные данные хешируем
+		h := sha256.Sum256([]byte(data))
 		dataBytes = h[:]
 	}
 
