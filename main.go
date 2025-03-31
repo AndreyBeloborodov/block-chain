@@ -73,7 +73,7 @@ func signHash(hash string) string {
 	return hex.EncodeToString(sig)
 }
 
-func verifySignature(data, signature string) bool {
+func verifySignature(data, signature string, isHash bool) bool {
 	log.Println("Verifying data:", data)
 
 	sigBytes, err := hex.DecodeString(signature)
@@ -91,7 +91,7 @@ func verifySignature(data, signature string) bool {
 	s := new(big.Int).SetBytes(sigBytes[32:])
 
 	var dataBytes []byte
-	if len(data) == 64 {
+	if isHash {
 		dataBytes, err = hex.DecodeString(data)
 		if err != nil {
 			log.Println("Error decoding hash data before verification:", err)
@@ -243,11 +243,11 @@ func verifyBlockchain(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, fmt.Sprintf("Blockchain integrity error at block %d", block.Index), http.StatusInternalServerError)
 			return
 		}
-		if !verifySignature(block.Data, block.DataSignature) {
+		if !verifySignature(block.Data, block.DataSignature, false) {
 			http.Error(w, fmt.Sprintf("Invalid data signature at block %d", block.Index), http.StatusInternalServerError)
 			return
 		}
-		if !verifySignature(block.Hash, block.HashSignature) {
+		if !verifySignature(block.Hash, block.HashSignature, true) {
 			http.Error(w, fmt.Sprintf("Invalid hash signature at block %d", block.Index), http.StatusInternalServerError)
 			return
 		}
@@ -267,11 +267,11 @@ func verifyBlock(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !verifySignature(block.Hash, block.HashSignature) {
+	if !verifySignature(block.Hash, block.HashSignature, true) {
 		http.Error(w, "Invalid hash signature", http.StatusInternalServerError)
 		return
 	}
-	if !verifySignature(block.Data, block.DataSignature) {
+	if !verifySignature(block.Data, block.DataSignature, false) {
 		http.Error(w, "Invalid data signature", http.StatusInternalServerError)
 		return
 	}
