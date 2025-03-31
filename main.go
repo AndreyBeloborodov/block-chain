@@ -74,8 +74,6 @@ func signHash(hash string) string {
 }
 
 func verifySignature(data, signature string, isHash bool) bool {
-	log.Println("Verifying data:", data)
-
 	sigBytes, err := hex.DecodeString(signature)
 	if err != nil {
 		log.Println("Error decoding signature:", err)
