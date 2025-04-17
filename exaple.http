@@ -1,0 +1,9 @@
+# curl -X POST http://localhost:8080/blocks
+#  -H "Content-Type: application/json"
+#  -d '{"data": "test_some_data"}'
+POST http://localhost:8080/blocks
+Content-Type: application/json
+
+{
+  "data": "test_some_data"
+}

@@ -5,6 +5,7 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -13,6 +14,7 @@ import (
 	"log"
 	"math/big"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gorilla/mux"
@@ -22,8 +24,12 @@ import (
 type Block struct {
 	Index         int    `json:"index"`
 	Timestamp     string `json:"timestamp"`
-	Data          string `json:"data"`
-	DataSignature string `json:"data_signature"`
+	Data1         string `json:"data1"`
+	Data2         string `json:"data2"`
+	Data3         string `json:"data3"`
+	Sig1          string `json:"sig1"`
+	Sig2          string `json:"sig2"`
+	Sig3          string `json:"sig3"`
 	PrevHash      string `json:"prev_hash"`
 	Hash          string `json:"hash"`
 	HashSignature string `json:"hash_signature"`
@@ -33,92 +39,106 @@ var db *sql.DB
 var privateKey *ecdsa.PrivateKey
 var publicKey ecdsa.PublicKey
 
+func saveKeys() {
+	privBytes, _ := x509.MarshalECPrivateKey(privateKey)
+	_ = os.WriteFile("private.pem", privBytes, 0600)
+
+	pubBytes, _ := x509.MarshalPKIXPublicKey(&publicKey)
+	_ = os.WriteFile("public.pem", pubBytes, 0644)
+}
+
+func loadKeys() error {
+	privData, err := os.ReadFile("private.pem")
+	if err != nil {
+		return err
+	}
+	privKey, err := x509.ParseECPrivateKey(privData)
+	if err != nil {
+		return err
+	}
+	privateKey = privKey
+	publicKey = privateKey.PublicKey
+	return nil
+}
+
 func initKeys() {
+	if err := loadKeys(); err == nil {
+		return
+	}
 	var err error
 	privateKey, err = ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		log.Fatal("Error generating private key:", err)
+		log.Fatal("Error generating key:", err)
 	}
 	publicKey = privateKey.PublicKey
+	saveKeys()
 }
 
 func signData(data string) string {
 	h := sha256.Sum256([]byte(data))
 	r, s, err := ecdsa.Sign(rand.Reader, privateKey, h[:])
 	if err != nil {
-		log.Fatal("Error signing data:", err)
+		log.Fatal("Sign error:", err)
 	}
-	sig := append(r.Bytes(), s.Bytes()...)
-	return hex.EncodeToString(sig)
-}
-
-func calculateHash(block Block) string {
-	record := fmt.Sprintf("%d%s%s%s%s", block.Index, block.Timestamp, block.Data, block.DataSignature, block.PrevHash)
-	h := sha256.Sum256([]byte(record))
-	return hex.EncodeToString(h[:])
-}
-
-func signHash(hash string) string {
-	hashBytes, err := hex.DecodeString(hash)
-	if err != nil {
-		log.Fatal("Error decoding hash before signing:", err)
-	}
-
-	r, s, err := ecdsa.Sign(rand.Reader, privateKey, hashBytes)
-	if err != nil {
-		log.Fatal("Error signing hash:", err)
-	}
-
 	sig := append(r.Bytes(), s.Bytes()...)
 	return hex.EncodeToString(sig)
 }
 
 func verifySignature(data, signature string, isHash bool) bool {
 	sigBytes, err := hex.DecodeString(signature)
-	if err != nil {
-		log.Println("Error decoding signature:", err)
+	if err != nil || len(sigBytes) != 64 {
 		return false
 	}
-
-	if len(sigBytes) != 64 {
-		log.Println("Invalid signature length:", len(sigBytes))
-		return false
-	}
-
 	r := new(big.Int).SetBytes(sigBytes[:32])
 	s := new(big.Int).SetBytes(sigBytes[32:])
-
-	var dataBytes []byte
+	var dataHash []byte
 	if isHash {
-		dataBytes, err = hex.DecodeString(data)
-		if err != nil {
-			log.Println("Error decoding hash data before verification:", err)
-			return false
-		}
+		dataHash, _ = hex.DecodeString(data)
 	} else {
 		h := sha256.Sum256([]byte(data))
-		dataBytes = h[:]
+		dataHash = h[:]
 	}
-
-	valid := ecdsa.Verify(&publicKey, dataBytes, r, s)
-	if !valid {
-		log.Println("Signature verification failed for data:", data)
-	}
-	return valid
+	return ecdsa.Verify(&publicKey, dataHash, r, s)
 }
 
-func createBlock(prevBlock Block, data string) Block {
-	dataSignature := signData(data)
-	newBlock := Block{
-		Index:         prevBlock.Index + 1,
-		Timestamp:     time.Now().String(),
-		Data:          data,
-		DataSignature: dataSignature,
-		PrevHash:      prevBlock.Hash,
+func signHash(hash string) string {
+	hashBytes, _ := hex.DecodeString(hash)
+	r, s, _ := ecdsa.Sign(rand.Reader, privateKey, hashBytes)
+	sig := append(r.Bytes(), s.Bytes()...)
+	return hex.EncodeToString(sig)
+}
+
+func calculateHash(b Block) string {
+	record := fmt.Sprintf("%d%s%s%s%s%s%s%s%s",
+		b.Index, b.Timestamp,
+		b.Data1, b.Sig1,
+		b.Data2, b.Sig2,
+		b.Data3, b.Sig3,
+		b.PrevHash,
+	)
+	h := sha256.Sum256([]byte(record))
+	return hex.EncodeToString(h[:])
+}
+
+func createBlock(prev Block, d1, d2, d3 string) Block {
+	sig1 := signData(d1)
+	sig2 := signData(d2)
+	sig3 := signData(d3)
+
+	b := Block{
+		Index:     prev.Index + 1,
+		Timestamp: time.Now().Format(time.RFC3339),
+		Data1:     d1,
+		Data2:     d2,
+		Data3:     d3,
+		Sig1:      sig1,
+		Sig2:      sig2,
+		Sig3:      sig3,
+		PrevHash:  prev.Hash,
 	}
-	newBlock.Hash = calculateHash(newBlock)
-	newBlock.HashSignature = signHash(newBlock.Hash)
-	return newBlock
+	b.Hash = calculateHash(b)
+	b.HashSignature = signHash(b.Hash)
+	return b
 }
 
 func initializeDB() {
@@ -127,150 +147,145 @@ func initializeDB() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	_, err = db.Exec(`CREATE TABLE IF NOT EXISTS blocks (
-		index SERIAL PRIMARY KEY,
-		timestamp TEXT,
-		data TEXT,
-		data_signature TEXT,
-		prev_hash TEXT,
-		hash TEXT UNIQUE,
-		hash_signature TEXT
-	)`)
+	_, err = db.Exec(`
+		CREATE TABLE IF NOT EXISTS blocks (
+			index SERIAL PRIMARY KEY,
+			timestamp TEXT,
+			data1 TEXT, data2 TEXT, data3 TEXT,
+			sig1 TEXT, sig2 TEXT, sig3 TEXT,
+			prev_hash TEXT, hash TEXT UNIQUE, hash_signature TEXT
+		)
+	`)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
-func addBlockToDB(block Block) {
-	_, err := db.Exec("INSERT INTO blocks (timestamp, data, data_signature, prev_hash, hash, hash_signature) VALUES ($1, $2, $3, $4, $5, $6)", block.Timestamp, block.Data, block.DataSignature, block.PrevHash, block.Hash, block.HashSignature)
+func addBlockToDB(b Block) {
+	_, err := db.Exec(`INSERT INTO blocks (timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+		b.Timestamp, b.Data1, b.Data2, b.Data3, b.Sig1, b.Sig2, b.Sig3, b.PrevHash, b.Hash, b.HashSignature)
 	if err != nil {
 		log.Fatal(err)
 	}
 }
 
 func getLastBlock() (Block, error) {
-	var block Block
-	row := db.QueryRow("SELECT index, timestamp, data, data_signature, prev_hash, hash, hash_signature FROM blocks ORDER BY index DESC LIMIT 1")
-	err := row.Scan(&block.Index, &block.Timestamp, &block.Data, &block.DataSignature, &block.PrevHash, &block.Hash, &block.HashSignature)
+	var b Block
+	row := db.QueryRow("SELECT index, timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature FROM blocks ORDER BY index DESC LIMIT 1")
+	err := row.Scan(&b.Index, &b.Timestamp, &b.Data1, &b.Data2, &b.Data3, &b.Sig1, &b.Sig2, &b.Sig3, &b.PrevHash, &b.Hash, &b.HashSignature)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Block{Index: -1}, nil
 	}
-	return block, err
+	return b, err
+}
+
+func addBlock(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Data1 string `json:"data1"`
+		Data2 string `json:"data2"`
+		Data3 string `json:"data3"`
+	}
+	json.NewDecoder(r.Body).Decode(&req)
+
+	prev, err := getLastBlock()
+	if err != nil {
+		http.Error(w, "Can't get last block", 500)
+		return
+	}
+	if prev.Index == -1 {
+		prev = createBlock(Block{Index: 0}, "Init1", "Init2", "Init3")
+		addBlockToDB(prev)
+	}
+	block := createBlock(prev, req.Data1, req.Data2, req.Data3)
+	addBlockToDB(block)
+	json.NewEncoder(w).Encode(block)
 }
 
 func getBlockchain(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT index, timestamp, data, data_signature, prev_hash, hash, hash_signature FROM blocks ORDER BY index")
+	rows, err := db.Query("SELECT index, timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature FROM blocks ORDER BY index")
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		http.Error(w, err.Error(), 500)
 		return
 	}
 	defer rows.Close()
-
-	var blockchain []Block
+	var chain []Block
 	for rows.Next() {
-		var block Block
-		if err := rows.Scan(&block.Index, &block.Timestamp, &block.Data, &block.DataSignature, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		var b Block
+		rows.Scan(&b.Index, &b.Timestamp, &b.Data1, &b.Data2, &b.Data3, &b.Sig1, &b.Sig2, &b.Sig3, &b.PrevHash, &b.Hash, &b.HashSignature)
+		chain = append(chain, b)
+	}
+	json.NewEncoder(w).Encode(chain)
+}
+
+func verifyBlockchain(w http.ResponseWriter, r *http.Request) {
+	rows, err := db.Query("SELECT index, timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature FROM blocks ORDER BY index")
+	if err != nil {
+		http.Error(w, err.Error(), 500)
+		return
+	}
+	defer rows.Close()
+	var prevHash string
+	for rows.Next() {
+		var b Block
+		err := rows.Scan(&b.Index, &b.Timestamp, &b.Data1, &b.Data2, &b.Data3, &b.Sig1, &b.Sig2, &b.Sig3, &b.PrevHash, &b.Hash, &b.HashSignature)
+		if err != nil {
+			http.Error(w, err.Error(), 500)
 			return
 		}
-		blockchain = append(blockchain, block)
+		if b.PrevHash != prevHash && b.Index != 0 {
+			http.Error(w, fmt.Sprintf("Invalid prev_hash at block %d", b.Index), 500)
+			return
+		}
+		if !verifySignature(b.Data1, b.Sig1, false) || !verifySignature(b.Data2, b.Sig2, false) || !verifySignature(b.Data3, b.Sig3, false) {
+			http.Error(w, fmt.Sprintf("Invalid data signature at block %d", b.Index), 500)
+			return
+		}
+		if !verifySignature(b.Hash, b.HashSignature, true) {
+			http.Error(w, fmt.Sprintf("Invalid hash signature at block %d", b.Index), 500)
+			return
+		}
+		prevHash = b.Hash
 	}
-
-	json.NewEncoder(w).Encode(blockchain)
+	w.Write([]byte("Blockchain is valid"))
 }
 
 func getBlockByIndex(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	index := vars["index"]
 	var block Block
-	row := db.QueryRow("SELECT index, timestamp, data, data_signature, prev_hash, hash, hash_signature FROM blocks WHERE index = $1", index)
-	if err := row.Scan(&block.Index, &block.Timestamp, &block.Data, &block.DataSignature, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
+	row := db.QueryRow("SELECT index, timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature FROM blocks WHERE index = $1", index)
+	if err := row.Scan(&block.Index, &block.Timestamp, &block.Data1, &block.Data2, &block.Data3, &block.Sig1, &block.Sig2, &block.Sig3, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
 		http.Error(w, "Block not found", http.StatusNotFound)
 		return
 	}
 	json.NewEncoder(w).Encode(block)
 }
 
-func addBlock(w http.ResponseWriter, r *http.Request) {
-	var requestData struct {
-		Data string `json:"data"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&requestData); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
-		return
-	}
-
-	prevBlock, err := getLastBlock()
-	if err != nil {
-		http.Error(w, "Failed to retrieve last block", http.StatusInternalServerError)
-		return
-	}
-
-	if prevBlock.Index == -1 {
-		prevBlock = Block{Index: 1, Timestamp: time.Now().String(), Data: "Block 1", PrevHash: ""}
-		prevBlock.DataSignature = signData(prevBlock.Data)
-		prevBlock.Hash = calculateHash(prevBlock)
-		prevBlock.HashSignature = signHash(prevBlock.Hash)
-		addBlockToDB(prevBlock)
-	}
-
-	newBlock := createBlock(prevBlock, requestData.Data)
-	addBlockToDB(newBlock)
-
-	json.NewEncoder(w).Encode(newBlock)
-}
-
-func verifyBlockchain(w http.ResponseWriter, r *http.Request) {
-	rows, err := db.Query("SELECT index, timestamp, data, data_signature, prev_hash, hash, hash_signature FROM blocks ORDER BY index")
-	if err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-	defer rows.Close()
-
-	var prevHash string
-	for rows.Next() {
-		var block Block
-		if err := rows.Scan(&block.Index, &block.Timestamp, &block.Data, &block.DataSignature, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		if block.PrevHash != prevHash && block.Index > 0 {
-			http.Error(w, fmt.Sprintf("Blockchain integrity error at block %d", block.Index), http.StatusInternalServerError)
-			return
-		}
-		if !verifySignature(block.Data, block.DataSignature, false) {
-			http.Error(w, fmt.Sprintf("Invalid data signature at block %d", block.Index), http.StatusInternalServerError)
-			return
-		}
-		if !verifySignature(block.Hash, block.HashSignature, true) {
-			http.Error(w, fmt.Sprintf("Invalid hash signature at block %d", block.Index), http.StatusInternalServerError)
-			return
-		}
-
-		prevHash = block.Hash
-	}
-	w.Write([]byte("Blockchain is valid"))
-}
-
 func verifyBlock(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	index := vars["index"]
 	var block Block
-	row := db.QueryRow("SELECT index, timestamp, data, data_signature, prev_hash, hash, hash_signature FROM blocks WHERE index = $1", index)
-	if err := row.Scan(&block.Index, &block.Timestamp, &block.Data, &block.DataSignature, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
+	row := db.QueryRow("SELECT index, timestamp, data1, data2, data3, sig1, sig2, sig3, prev_hash, hash, hash_signature FROM blocks WHERE index = $1", index)
+	if err := row.Scan(&block.Index, &block.Timestamp, &block.Data1, &block.Data2, &block.Data3, &block.Sig1, &block.Sig2, &block.Sig3, &block.PrevHash, &block.Hash, &block.HashSignature); err != nil {
 		http.Error(w, "Block not found", http.StatusNotFound)
 		return
 	}
 
-	if !verifySignature(block.Hash, block.HashSignature, true) {
-		http.Error(w, "Invalid hash signature", http.StatusInternalServerError)
+	if !verifySignature(block.Data1, block.Sig1, false) {
+		http.Error(w, "Invalid Data1 signature", http.StatusInternalServerError)
 		return
 	}
-	if !verifySignature(block.Data, block.DataSignature, false) {
-		http.Error(w, "Invalid data signature", http.StatusInternalServerError)
+	if !verifySignature(block.Data2, block.Sig2, false) {
+		http.Error(w, "Invalid Data2 signature", http.StatusInternalServerError)
+		return
+	}
+	if !verifySignature(block.Data3, block.Sig3, false) {
+		http.Error(w, "Invalid Data3 signature", http.StatusInternalServerError)
+		return
+	}
+	if !verifySignature(block.Hash, block.HashSignature, true) {
+		http.Error(w, "Invalid hash signature", http.StatusInternalServerError)
 		return
 	}
 
@@ -283,10 +298,9 @@ func main() {
 	r := mux.NewRouter()
 	r.HandleFunc("/blocks", getBlockchain).Methods("GET")
 	r.HandleFunc("/blocks", addBlock).Methods("POST")
+	r.HandleFunc("/verify", verifyBlockchain).Methods("GET")
 	r.HandleFunc("/blocks/{index}", getBlockByIndex).Methods("GET")
 	r.HandleFunc("/blocks/{index}/verify", verifyBlock).Methods("GET")
-	r.HandleFunc("/verify", verifyBlockchain).Methods("GET")
-
-	log.Println("Server running on port 8080")
+	log.Println("Server started at :8080")
 	http.ListenAndServe(":8080", r)
 }
